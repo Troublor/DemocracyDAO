@@ -21,7 +21,7 @@ contract Moloch {
     /***************
     GLOBAL CONSTANTS
     ***************/
-  uint256 public periodDuration; // default = 17280 = 4.8 hours in seconds (5 periods per day)
+    uint256 public periodDuration; // default = 17280 = 4.8 hours in seconds (5 periods per day)
     uint256 public votingPeriodLength; // default = 35 periods (7 days)
     uint256 public gracePeriodLength; // default = 35 periods (7 days)
     uint256 public abortWindow; // default = 5 periods (1 day)
@@ -29,6 +29,7 @@ contract Moloch {
     uint256 public dilutionBound; // default = 3 - maximum multiplier a YES voter will be obligated to pay in case of mass ragequit
     uint256 public processingReward; // default = 0.1 - amount of ETH to give to whoever processes a proposal
     uint256 public summoningTime; // needed to determine the current period
+    uint256 public candidatesMaximum; // default = 150 based on dunbar; maximum amount of candidates allowed in a ballot.
 
     IERC20 public approvedToken; // approved token contract reference; default = wETH
     GuildBank public guildBank; // guild bank contract reference
@@ -44,9 +45,9 @@ contract Moloch {
     /***************
     EVENTS
     ***************/
-    event SubmitProposal(uint256 proposalIndex, address indexed delegateKey, address indexed memberAddress, address indexed applicant, uint256 tokenTribute, uint256 sharesRequested);
-    event SubmitVote(uint256 indexed proposalIndex, address indexed delegateKey, address indexed memberAddress, uint8 uintVote);
-    event ProcessProposal(uint256 indexed proposalIndex, address indexed applicant, address indexed memberAddress, uint256 tokenTribute, uint256 sharesRequested, bool didPass);
+    event SubmitProposal(uint256 proposalIndex, address indexed delegateKey, address indexed memberAddress, address[] indexed candidates, uint256 tokenTribute, uint256 sharesRequested);
+    event SubmitVote(uint256 indexed proposalIndex, address indexed delegateKey, address indexed memberAddress, address indexed candidate, uint256 vote);
+    event ProcessProposal(uint256 indexed proposalIndex, address[] indexed candidates, address indexed memberAddress, uint256 tokenTribute, uint256 sharesRequested, bool didPass);
     event Ragequit(address indexed memberAddress, uint256 sharesToBurn);
     event Abort(uint256 indexed proposalIndex, address applicantAddress);
     event UpdateDelegateKey(address indexed memberAddress, address newDelegateKey);
@@ -64,6 +65,12 @@ contract Moloch {
         No
     }
 
+    struct Ballot {
+        address candidate,
+        uint256 votes,
+        uint256 quadraticVotes
+    }
+
     struct Member {
         address delegateKey; // the key responsible for submitting proposals and voting - defaults to member address unless updated
         uint256 shares; // the # of shares assigned to this member
@@ -73,18 +80,21 @@ contract Moloch {
 
     struct Proposal {
         address proposer; // the member who submitted the proposal
-        address applicant; // the applicant who wishes to become a member - this key will be used for withdrawals
+        address[] candidates; // list of candidates to include in a ballot
+        uint256[] votes; // votes for each indexed candidate
+        uint256[] quadraticVotes; // quadratic votes for each indexed candidate
         uint256 sharesRequested; // the # of shares the applicant is requesting
         uint256 startingPeriod; // the period in which voting can start for this proposal
         uint256 yesVotes; // the total number of YES votes for this proposal
         uint256 noVotes; // the total number of NO votes for this proposal
         bool processed; // true only if the proposal has been processed
-        bool didPass; // true only if the proposal passed
+        // bool didPass; // true only if the proposal passed
+        address electedCandidate; // address of an electeed candidate
         bool aborted; // true only if applicant calls "abort" fn before end of voting period
         uint256 tokenTribute; // amount of tokens offered as tribute
         string details; // proposal details - could be IPFS hash, plaintext, or JSON
         uint256 maxTotalSharesAtYesVote; // the maximum # of total shares encountered at a yes vote on this proposal
-        mapping (address => Vote) votesByMember; // the votes on this proposal by each member
+        mapping (address => Ballot[]) votesByMember; // the votes on this proposal by each member
     }
 
     mapping (address => Member) public members;
@@ -116,7 +126,8 @@ contract Moloch {
         uint256 _abortWindow,
         uint256 _proposalDeposit,
         uint256 _dilutionBound,
-        uint256 _processingReward
+        uint256 _processingReward,
+        uint256 _candidatesMaximum,
     ) public {
         require(summoner != address(0), "Moloch::constructor - summoner cannot be 0");
         require(_approvedToken != address(0), "Moloch::constructor - _approvedToken cannot be 0");
@@ -141,6 +152,7 @@ contract Moloch {
         proposalDeposit = _proposalDeposit;
         dilutionBound = _dilutionBound;
         processingReward = _processingReward;
+        candidatesMaximum = _candidatesMaximum;
 
         summoningTime = now;
 
@@ -156,7 +168,7 @@ contract Moloch {
     *****************/
 
     function submitProposal(
-        address applicant,
+        address[] candidates,
         uint256 tokenTribute,
         uint256 sharesRequested,
         string memory details
@@ -164,7 +176,10 @@ contract Moloch {
         public
         onlyDelegate
     {
-        require(applicant != address(0), "Moloch::submitProposal - applicant cannot be 0");
+        require(candidates.length > 0, "MolochQV::submitProposal - at least 1 candidate is required.");
+        for (uint i=0; i < candidates.length; i++) {
+            require(candidates[i] != address(0), "Moloch::submitProposal - candidate cannot be 0");
+        }
 
         // Make sure we won't run into overflows when doing calculations with shares.
         // Note that totalShares + totalSharesRequested + sharesRequested is an upper bound
@@ -178,8 +193,10 @@ contract Moloch {
         // collect proposal deposit from proposer and store it in the Moloch until the proposal is processed
         require(approvedToken.transferFrom(msg.sender, address(this), proposalDeposit), "Moloch::submitProposal - proposal deposit token transfer failed");
 
-        // collect tribute from applicant and store it in the Moloch until the proposal is processed
-        require(approvedToken.transferFrom(applicant, address(this), tokenTribute), "Moloch::submitProposal - tribute token transfer failed");
+        // collect tribute from candidate list and store it in the Moloch until the proposal is processed
+        for (uint k=0; k < candidates.length; k++) {
+            require(approvedToken.transferFrom(candidates[k], address(this), tokenTribute), "Moloch::submitProposal - tribute token transfer failed");
+        }
 
         // compute startingPeriod for proposal
         uint256 startingPeriod = max(
@@ -190,13 +207,11 @@ contract Moloch {
         // create proposal ...
         Proposal memory proposal = Proposal({
             proposer: memberAddress,
-            applicant: applicant,
+            candidates: candidates,
             sharesRequested: sharesRequested,
             startingPeriod: startingPeriod,
-            yesVotes: 0,
-            noVotes: 0,
+            electedCandidate: address(0x0),
             processed: false,
-            didPass: false,
             aborted: false,
             tokenTribute: tokenTribute,
             details: details,
@@ -207,47 +222,43 @@ contract Moloch {
         proposalQueue.push(proposal);
 
         uint256 proposalIndex = proposalQueue.length.sub(1);
-        emit SubmitProposal(proposalIndex, msg.sender, memberAddress, applicant, tokenTribute, sharesRequested);
+        emit SubmitProposal(proposalIndex, msg.sender, memberAddress, candidates, tokenTribute, sharesRequested);
     }
 
-    function submitVote(uint256 proposalIndex, uint8 uintVote) public onlyDelegate {
+    function submitVote(uint256 proposalIndex, address candidate, uint256 votes) public onlyDelegate {
         address memberAddress = memberAddressByDelegateKey[msg.sender];
         Member storage member = members[memberAddress];
 
         require(proposalIndex < proposalQueue.length, "Moloch::submitVote - proposal does not exist");
         Proposal storage proposal = proposalQueue[proposalIndex];
+        
+        require(votes > 0, "MolochQV - at least one vote must be cast");
 
-        require(uintVote < 3, "Moloch::submitVote - uintVote must be less than 3");
-        Vote vote = Vote(uintVote);
+        Ballot ballot = Ballot({
+            candidate: candidate,
+            votes: votes,
+            quadraticVotes: sqrt(votes),
+        })
 
         require(getCurrentPeriod() >= proposal.startingPeriod, "Moloch::submitVote - voting period has not started");
         require(!hasVotingPeriodExpired(proposal.startingPeriod), "Moloch::submitVote - proposal voting period has expired");
-        require(proposal.votesByMember[memberAddress] == Vote.Null, "Moloch::submitVote - member has already voted on this proposal");
-        require(vote == Vote.Yes || vote == Vote.No, "Moloch::submitVote - vote must be either Yes or No");
+        // require(proposal.votesByMember[memberAddress] == Ballot.Null, "Moloch::submitVote - member has already voted on this proposal");
+        // require(vote == Vote.Yes || vote == Vote.No, "Moloch::submitVote - vote must be either Yes or No");
         require(!proposal.aborted, "Moloch::submitVote - proposal has been aborted");
 
         // store vote
-        proposal.votesByMember[memberAddress] = vote;
-
-        // count vote
-        if (vote == Vote.Yes) {
-            proposal.yesVotes = proposal.yesVotes.add(member.shares);
-
-            // set highest index (latest) yes vote - must be processed for member to ragequit
-            if (proposalIndex > member.highestIndexYesVote) {
-                member.highestIndexYesVote = proposalIndex;
+        proposal.votesByMember[memberAddress] = ballot;
+        for (uint i = 0; i < proposal.candidates.length; i++) {
+            if (proposal.candidates[i] == candidate) {
+                proposal.votes[i] = votes;
+                proposal.quadraticVotes[i]: sqrt(votes);
             }
-
-            // set maximum of total shares encountered at a yes vote - used to bound dilution for yes voters
-            if (totalShares > proposal.maxTotalSharesAtYesVote) {
-                proposal.maxTotalSharesAtYesVote = totalShares;
-            }
-
-        } else if (vote == Vote.No) {
-            proposal.noVotes = proposal.noVotes.add(member.shares);
         }
+        
 
-        emit SubmitVote(proposalIndex, msg.sender, memberAddress, uintVote);
+
+
+        emit SubmitVote(proposalIndex, msg.sender, memberAddress, candidate, votes);
     }
 
     function processProposal(uint256 proposalIndex) public {
@@ -261,7 +272,8 @@ contract Moloch {
         proposal.processed = true;
         totalSharesRequested = totalSharesRequested.sub(proposal.sharesRequested);
 
-        bool didPass = proposal.yesVotes > proposal.noVotes;
+        for (uint i)
+        bool electedCandidate = proposal.yesVotes > proposal.noVotes;
 
         // Make the proposal fail if the dilutionBound is exceeded
         if (totalShares.mul(dilutionBound) < proposal.maxTotalSharesAtYesVote) {
@@ -397,6 +409,15 @@ contract Moloch {
 
     function max(uint256 x, uint256 y) internal pure returns (uint256) {
         return x >= y ? x : y;
+    }
+
+    function sqrt(uint256 x) internal pure returns (uint256 y) {
+        uint256 z = (x + 1) / 2;
+        y = x;
+        while (z < y) {
+            y = z;
+            z = (x / z + z) / 2;
+        }
     }
 
     function getCurrentPeriod() public view returns (uint256) {
