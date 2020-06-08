@@ -45,8 +45,8 @@ contract Moloch {
     /***************
     EVENTS
     ***************/
-    event SubmitProposal(uint256 proposalIndex, address indexed delegateKey, address indexed memberAddress, address[] indexed candidates, uint256 tokenTribute, uint256 sharesRequested);
-    event SubmitVote(uint256 indexed proposalIndex, address indexed delegateKey, address indexed memberAddress, address indexed candidate, uint256 votes, uint256 quadraticVotes);
+    event SubmitProposal(uint256 proposalIndex, address indexed delegateKey, address indexed memberAddress, address[] candidates, uint256 tokenTribute, uint256 sharesRequested);
+    event SubmitVote(uint256 indexed proposalIndex, address indexed delegateKey, address indexed memberAddress, address candidate, uint256 votes, uint256 quadraticVotes);
     event ProcessProposal(uint256 indexed proposalIndex, address indexed electedCandidate, address indexed memberAddress, uint256 tokenTribute, uint256 sharesRequested, bool didPass);
     event Ragequit(address indexed memberAddress, uint256 sharesToBurn);
     event Abort(uint256 indexed proposalIndex, address applicantAddress);
@@ -59,11 +59,11 @@ contract Moloch {
     uint256 public totalShares = 0; // total shares across all members
     uint256 public totalSharesRequested = 0; // total shares that have been requested in unprocessed proposals
 
-
     struct Ballot {
-        uint256[] votes,
-        uint256[] quadraticVotes,
-        address[] candidate
+        address owner;
+        uint256[] votes;
+        uint256[] quadraticVotes;
+        address[] candidate;
     }
 
     struct Member {
@@ -80,8 +80,6 @@ contract Moloch {
         uint256[] totalQuadraticVotes; // calculation of quadratic votes for each candidate
         uint256 sharesRequested; // the # of shares the applicant is requesting
         uint256 startingPeriod; // the period in which voting can start for this proposal
-        uint256 yesVotes; // the total number of YES votes for this proposal
-        uint256 noVotes; // the total number of NO votes for this proposal
         bool processed; // true only if the proposal has been processed
         bool didPass; // true only if the proposal has elected a candidate
         address electedCandidate; // address of an electeed candidate
@@ -122,7 +120,7 @@ contract Moloch {
         uint256 _proposalDeposit,
         uint256 _dilutionBound,
         uint256 _processingReward,
-        uint256 _quadraticMode
+        bool _quadraticMode
     ) public {
         require(summoner != address(0), "Moloch::constructor - summoner cannot be 0");
         require(_approvedToken != address(0), "Moloch::constructor - _approvedToken cannot be 0");
@@ -163,7 +161,7 @@ contract Moloch {
     *****************/
 
     function submitProposal(
-        address[] candidates,
+        address[] memory candidates,
         uint256 tokenTribute,
         uint256 sharesRequested,
         string memory details
@@ -176,6 +174,7 @@ contract Moloch {
             require(candidates[i] != address(0), "Moloch::submitProposal - candidate cannot be 0");
         }
 
+        
         // Make sure we won't run into overflows when doing calculations with shares.
         // Note that totalShares + totalSharesRequested + sharesRequested is an upper bound
         // on the number of shares that can exist until this proposal has been processed.
@@ -200,13 +199,17 @@ contract Moloch {
         ).add(1);
 
         // create proposal ...
+        
         Proposal memory proposal = Proposal({
             proposer: memberAddress,
             candidates: candidates,
+            totalVotes: new uint256[](candidates.length),
+            totalQuadraticVotes: new uint256[](candidates.length),
             sharesRequested: sharesRequested,
             startingPeriod: startingPeriod,
-            electedCandidate: address(0x0),
             processed: false,
+            didPass: false,
+            electedCandidate: address(0x0),
             aborted: false,
             tokenTribute: tokenTribute,
             details: details,
@@ -216,11 +219,12 @@ contract Moloch {
         // ... and append it to the queue
         proposalQueue.push(proposal);
 
-        uint256 proposalIndex = proposalQueue.length.sub(1);
+        uint256 proposalIndex = proposalQueue.length.sub(1);  
         emit SubmitProposal(proposalIndex, msg.sender, memberAddress, candidates, tokenTribute, sharesRequested);
     }
 
     function submitVote(uint256 proposalIndex, address candidate, uint256 votes) public onlyDelegate {
+        
         address memberAddress = memberAddressByDelegateKey[msg.sender];
         Member storage member = members[memberAddress];
 
@@ -232,51 +236,37 @@ contract Moloch {
         require(!hasVotingPeriodExpired(proposal.startingPeriod), "Moloch::submitVote - proposal voting period has expired");
         require(!proposal.aborted, "Moloch::submitVote - proposal has been aborted");
 
-        // store vote
-        Ballot memberBallot = proposal.votesByMember[memberAddress];
+        Ballot storage memberBallot = proposal.votesByMember[memberAddress];
 
-        uint256 totalVotes = 0;
-        uint256 newVotes = 0;
-        bool update = false;
-        uint256 quadraticVotes = 0;
-        for (uint i = 0; i < memberBallot.candidate.length; i++) {
-            if (memberBallot.candidate[i] == candidate) {
-                update = true;
+        // store vote
+        uint256 totalVotes;
+        uint256 newVotes;
+        uint256 quadraticVotes;
+
+        //Set empty array for new ballot
+        if (memberBallot.votes.length == 0) {
+            memberBallot.votes = new uint256[](proposal.candidates.length);
+            memberBallot.candidate = new address[](proposal.candidates.length);
+            memberBallot.quadraticVotes = new uint256[](proposal.candidates.length);
+        }
+        for (uint i = 0; i < proposal.candidates.length; i++) {
+            if (proposal.candidates[i] == candidate) {
                 newVotes = memberBallot.votes[i].add(votes);
+                uint256 prevquadraticVotes = memberBallot.quadraticVotes[i];
                 quadraticVotes = sqrt(newVotes);
+                proposal.totalVotes[i] = proposal.totalVotes[i].add(votes);
+                proposal.totalQuadraticVotes[i] = proposal.totalQuadraticVotes[i].sub(prevquadraticVotes).add(quadraticVotes);
+                memberBallot.candidate[i] = candidate;
                 memberBallot.votes[i] = newVotes;
                 memberBallot.quadraticVotes[i] = quadraticVotes;
-            }
+                if (proposalIndex > member.highestIndexVote) {
+                    member.highestIndexVote = proposalIndex;
+                }           
+            } 
             totalVotes = totalVotes.add(memberBallot.votes[i]);
         }
+
         require(totalVotes <= member.shares, "QuadraticMoloch::submitVote - not enough shares to cast this quantity of votes");
-
-        if (!update) {
-            memberBallot.candidate.push(candidate);
-            memberBallot.votes.push(votes);
-            quadraticVotes = sqrt(votes);
-            memberBallot.quadraticVotes.push(quadraticVotes);
-            proposal.votesByMember[memberAddress] = memberBallot;
-        }
-
-        // count vote
-        update = false;
-        for (uint k = 0; k < proposal.candidates.length; k++) {
-            if (proposal.candidates[k] == candidate) {
-                proposal.totalVotes[k] = proposal.totalVotes[k].add(votes);
-                proposal.totalQuadraticVotes[k] = sqrt(proposal.totalVotes[k]);
-                update = true;
-            }
-        }
-        if (!update) {
-            proposal.candidates.push(candidate);
-            proposal.totalVotes.push(votes);
-            proposal.totalQuadraticVotes.push(sqrt(votes));
-        }
-
-        if (proposalIndex > member.highestIndexVote) {
-            member.highestIndexVote = proposalIndex;
-        }
 
         emit SubmitVote(proposalIndex, msg.sender, memberAddress, candidate, votes, quadraticVotes);
     }
@@ -299,6 +289,7 @@ contract Moloch {
         bool didPass = true;
         for (uint i = 0; i < proposal.totalVotes.length; i++) {
             if (quadraticMode) {
+                require(proposal.totalQuadraticVotes[i] != largest, "QuadraticMoloch::processProposal - this proposal has no winner" );
                 if (proposal.totalQuadraticVotes[i] > largest) {
                     largest = proposal.totalQuadraticVotes[i];
                     elected = i;
@@ -307,75 +298,88 @@ contract Moloch {
                 largest = proposal.totalVotes[i];
                 elected = i;
             }
-        }
-        electedCandidate = proposal.candidates[i];
+        
+            address electedCandidate = proposal.candidates[i];
 
-        // Make the proposal fail if the dilutionBound is exceeded
-        if (totalShares.mul(dilutionBound) < proposal.maxTotalSharesAtYesVote) {
-            didPass = false;
-        }
-
-        // PROPOSAL PASSED
-        if (didPass && !proposal.aborted) {
-
-            proposal.didPass = true;
-
-            // if the elected candidate is already a member, add to their existing shares
-            if (members[electedCandidate].exists) {
-                members[electedCandidate].shares = members[electedCandidate].shares.add(proposal.sharesRequested);
-
-            // the applicant is a new member, create a new record for them
-            } else {
-                // if the applicant address is already taken by a member's delegateKey, reset it to their member address
-                if (members[memberAddressByDelegateKey[electedCandidate]].exists) {
-                    address memberToOverride = memberAddressByDelegateKey[electedCandidate];
-                    memberAddressByDelegateKey[memberToOverride] = memberToOverride;
-                    members[memberToOverride].delegateKey = memberToOverride;
-                }
-
-                // use elected candidate address as delegateKey by default
-                members[electedCandidate] = Member(electedCandidate, proposal.sharesRequested, true, 0);
-                memberAddressByDelegateKey[electedCandidate] = electedCandidate;
+            // Make the proposal fail if the dilutionBound is exceeded
+            if (totalShares.mul(dilutionBound) < proposal.maxTotalSharesAtYesVote) {
+                didPass = false;
             }
 
-            // mint new shares
-            totalShares = totalShares.add(proposal.sharesRequested);
+            // PROPOSAL PASSED
+            if (didPass && !proposal.aborted) {
 
-            // transfer tokens to guild bank
-            require(
+                proposal.didPass = true;
+                proposal.electedCandidate = electedCandidate;
+
+                // if the elected candidate is already a member, add to their existing shares
+                if (members[electedCandidate].exists) {
+                    members[electedCandidate].shares = members[electedCandidate].shares.add(proposal.sharesRequested);
+
+                // the applicant is a new member, create a new record for them
+                } else {
+                    // if the applicant address is already taken by a member's delegateKey, reset it to their member address
+                    if (members[memberAddressByDelegateKey[electedCandidate]].exists) {
+                        address memberToOverride = memberAddressByDelegateKey[electedCandidate];
+                        memberAddressByDelegateKey[memberToOverride] = memberToOverride;
+                        members[memberToOverride].delegateKey = memberToOverride;
+                    }
+
+                    // use elected candidate address as delegateKey by default
+                    members[electedCandidate] = Member(electedCandidate, proposal.sharesRequested, true, 0);
+                    memberAddressByDelegateKey[electedCandidate] = electedCandidate;
+                }
+
+                // mint new shares
+                totalShares = totalShares.add(proposal.sharesRequested);
+
+                // transfer tokens to guild bank from winner
+                require(
                 approvedToken.transfer(address(guildBank), proposal.tokenTribute),
                 "Moloch::processProposal - token transfer to guild bank failed"
+                );
+                // return tokens to other candidates
+                for (uint k = 0; k < proposal.candidates.length; k++) {
+                    if (proposal.candidates[k] != electedCandidate) {
+                        require(
+                        approvedToken.transfer(proposal.candidates[k], proposal.tokenTribute),
+                        "Moloch::processProposal - token transfer to guild bank failed"
+                        );
+                    }
+                }
+
+            // PROPOSAL FAILED OR ABORTED
+            } else {
+                // return all tokens to the candidates
+                for (uint z = 0; z < proposal.candidates.length; z++) {
+                    require(
+                    approvedToken.transfer(proposal.candidates[z], proposal.tokenTribute),
+                    "Moloch::processProposal - token transfer to guild bank failed"
+                    );
+                }
+            }
+
+            // send msg.sender the processingReward
+            require(
+                approvedToken.transfer(msg.sender, processingReward),
+                "Moloch::processProposal - failed to send processing reward to msg.sender"
             );
 
-        // PROPOSAL FAILED OR ABORTED
-        } else {
-            // return all tokens to the applicant
+            // return deposit to proposer (subtract processing reward)
             require(
-                approvedToken.transfer(electedCandidate, proposal.tokenTribute),
-                "Moloch::processProposal - failing vote token transfer failed"
+                approvedToken.transfer(proposal.proposer, proposalDeposit.sub(processingReward)),
+                "Moloch::processProposal - failed to return proposal deposit to proposer"
+            );
+
+            emit ProcessProposal(
+                proposalIndex,
+                electedCandidate,
+                proposal.proposer,
+                proposal.tokenTribute,
+                proposal.sharesRequested,
+                didPass
             );
         }
-
-        // send msg.sender the processingReward
-        require(
-            approvedToken.transfer(msg.sender, processingReward),
-            "Moloch::processProposal - failed to send processing reward to msg.sender"
-        );
-
-        // return deposit to proposer (subtract processing reward)
-        require(
-            approvedToken.transfer(proposal.proposer, proposalDeposit.sub(processingReward)),
-            "Moloch::processProposal - failed to return proposal deposit to proposer"
-        );
-
-        emit ProcessProposal(
-            proposalIndex,
-            electedCandidate,
-            proposal.proposer,
-            proposal.tokenTribute,
-            proposal.sharesRequested,
-            didPass
-        );
     }
 
     function ragequit(uint256 sharesToBurn) public onlyMember {
@@ -403,8 +407,15 @@ contract Moloch {
     function abort(uint256 proposalIndex) public {
         require(proposalIndex < proposalQueue.length, "Moloch::abort - proposal does not exist");
         Proposal storage proposal = proposalQueue[proposalIndex];
-
-        require(msg.sender == proposal.applicant, "Moloch::abort - msg.sender must be applicant");
+        
+        bool applicant = false;
+        for (uint i = 0; i < proposal.totalVotes.length; i++) {
+            address electedCandidate = proposal.candidates[i];  
+            if (msg.sender == electedCandidate){
+                applicant = true;
+            }
+        }
+        require(applicant == true, "Moloch::abort - msg.sender must be applicant");
         require(getCurrentPeriod() < proposal.startingPeriod.add(abortWindow), "Moloch::abort - abort window must not have passed");
         require(!proposal.aborted, "Moloch::abort - proposal must not have already been aborted");
 
@@ -412,11 +423,11 @@ contract Moloch {
         proposal.tokenTribute = 0;
         proposal.aborted = true;
 
-        // return all tokens to the applicant
-        require(
-            approvedToken.transfer(proposal.applicant, tokensToAbort),
-            "Moloch::processProposal - failed to return tribute to applicant"
-        );
+        address[] storage candidates = proposal.candidates;
+        // return all tokens to the applicants
+        for (uint k=0; k < candidates.length; k++) {
+            require(approvedToken.transfer(candidates[k], tokensToAbort), "Moloch::processProposal - failed to return tribute to applicant");
+        }
 
         emit Abort(proposalIndex, msg.sender);
     }
@@ -473,9 +484,13 @@ contract Moloch {
         return getCurrentPeriod() >= startingPeriod.add(votingPeriodLength);
     }
 
-    function getMemberProposalVote(address memberAddress, uint256 proposalIndex) public view returns (Vote) {
+    function getMemberProposalVote(address memberAddress, uint256 proposalIndex) public view returns (uint256[] memory, uint256[] memory, address[] memory) {
         require(members[memberAddress].exists, "Moloch::getMemberProposalVote - member doesn't exist");
         require(proposalIndex < proposalQueue.length, "Moloch::getMemberProposalVote - proposal doesn't exist");
-        return proposalQueue[proposalIndex].votesByMember[memberAddress];
+        
+        uint256[] memory _votes = proposalQueue[proposalIndex].votesByMember[memberAddress].votes;
+        uint256[] memory _quadraticVotes = proposalQueue[proposalIndex].votesByMember[memberAddress].quadraticVotes;
+        address[] memory _candidate = proposalQueue[proposalIndex].votesByMember[memberAddress].candidate;
+        return (_votes, _quadraticVotes, _candidate);
     }
 }
