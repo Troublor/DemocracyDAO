@@ -31,6 +31,13 @@ module.exports = {
         pool: ""
       }
     },
+    testnet: {
+      url: `http://localhost:8545`,
+      deployedContracts: {
+        moloch: '', // The original Moloch
+        pool: ''
+      }
+    },
     coverage: {
       url: 'http://localhost:8555'
     }
