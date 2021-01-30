@@ -34,14 +34,6 @@ task('moloch-deploy', 'Deploys a new instance of the Moloch DAO')
       '  processingReward:', deploymentParams.PROCESSING_REWARD, '\n'
     )
 
-    const Confirm = require('prompt-confirm')
-    const prompt = new Confirm('Please confirm that the deployment parameters are correct')
-    const confirmation = await prompt.run()
-
-    if (!confirmation) {
-      return
-    }
-
     const Moloch = artifacts.require('Moloch')
 
     console.log("Deploying...")
