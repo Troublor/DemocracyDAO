@@ -29,9 +29,8 @@
     "gcli": "ganache-cli -l 8000000 -m \"fetch local valve black attend double eye excite planet primary install allow\"",
     "lint:tests": "eslint test/*.js",
     "coverage": "SOLIDITY_COVERAGE=true bash scripts/test.sh",
-    "deploy": "npx buidler --network testnet moloch-deploy",
-    "propose": "npx buidler --network testnet moloch-submit-proposal  --applicant 0x6463f93d65391a8b7c98f0fc8439efd5d38339d9 --details \"Proposal 3\" --shares 1 --tribute 0"
-    "process": "npx buidler --network testnet moloch-process-proposal  --applicant 0x6463f93d65391a8b7c98f0fc8439efd5d38339d9 --details \"Proposal 3\" --shares 1 --tribute 0"
+    "propose": "npx buidler --network testnet moloch-submit-proposal  --applicant 0x6463f93d65391a8b7c98f0fc8439efd5d38339d9 --details \"Proposal 1\" --shares 1 --tribute 0",
+    "process": "npx buidler --network testnet moloch-process-proposal  --proposal 1"
   },
   "repository": {
     "type": "git",
