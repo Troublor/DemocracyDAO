@@ -115,18 +115,19 @@ contract MolochPool {
         );
 
         // declare proposal params
-        address proposer;
+        address applicant;
         uint256 sharesRequested;
         bool processed;
         bool didPass;
         bool aborted;
         uint256 tokenTribute;
         uint256 maxTotalSharesAtYesVote;
+
         uint256 i = currentProposalIndex;
 
         while (i < toIndex) {
 
-            (proposer, sharesRequested, , processed, didPass, , aborted, tokenTribute, , maxTotalSharesAtYesVote) = moloch.proposalQueue(i);
+            (, applicant, sharesRequested, , , , processed, didPass, aborted, tokenTribute, , maxTotalSharesAtYesVote) = moloch.proposalQueue(i);
 
             if (!processed) { break; }
 
@@ -137,7 +138,7 @@ contract MolochPool {
                 //   2. sharesRequested is <= 10**18 (see Moloch.sol:172), and
                 //      totalPoolShares <= 10**30, so multiplying them is <= 10**48 and < 2**160
                 uint256 sharesToMint = totalPoolShares.mul(sharesRequested).div(maxTotalSharesAtYesVote); // for a passing proposal, maxTotalSharesAtYesVote is > 0
-                _mintSharesForAddress(sharesToMint, proposer);
+                _mintSharesForAddress(sharesToMint, applicant);
             }
 
             i++;

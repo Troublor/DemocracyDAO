@@ -1,18 +1,12 @@
-THIS CODE WAS STOLEN
+STEAL THIS CODE
 
-# Quadratic Moloch
+# Moloch
 
-This is a fork of the original [MolochDAO](https://github.com/molochventures/moloch) contract adapted to allow election of candidates and the optional use of quadratic voting to tally the votes.
+> Moloch the incomprehensible prison! Moloch the crossbone soulless jailhouse and Congress of sorrows! Moloch whose buildings are judgment! Moloch the vast stone of war! Moloch the stunned governments!
+>
+> Moloch whose mind is pure machinery! Moloch whose blood is running money! Moloch whose fingers are ten armies! Moloch whose breast is a cannibal dynamo! Moloch whose ear is a smoking tomb!
 
-* An additional parameter in the constructor `bool _quadraticMode` is introduced to make optional tallying the votes on this DAO quadratically or old school. 
-
-*  `Proposals` now include a `mapping (address => Ballot) votesByMember` that allows to persist votes given to `candidates`.
-
-* `Ballot` struct persists for each `proposal` an array of `candidates` and the corresponding indexed `votes` and `quadraticVotes` that `candidate` received from a `member`.
-
-* When processed, an `electedCandidate` address from a `proposal` will be awarded with the corresponding shares fromi the DAO.
-
-* Each proposal has an array of `candidates` and a tally of `totalVotes` and `totalQuadraticVotes`.
+~ Allen Ginsberg, Howl
 
 Moloch is a grant-making DAO / Guild and a radical experiment in voluntary incentive alignment to overcome the "tragedy of the commons". Our objective is to accelerate the development of public Ethereum infrastructure that many teams need but don't want to pay for on their own. By pooling our ETH, teams building on Ethereum can collectively fund open-source work we decide is in our common interest.
 
@@ -164,7 +158,6 @@ function below.
     uint256 public dilutionBound; // default = 3 - maximum multiplier a YES voter will be obligated to pay in case of mass ragequit
     uint256 public processingReward; // default = 0.1 - amount of ETH to give to whoever processes a proposal
     uint256 public summoningTime; // needed to determine the current period
-    bool public quadraticMode; // if it will computed quadratic votes over traditional ones.
 
     IERC20 public approvedToken; // approved token contract reference; default = wETH
     GuildBank public guildBank; // guild bank contract reference
@@ -191,39 +184,22 @@ The `Proposal` struct stores all relevant data for each proposal, and is saved i
 ```
     struct Proposal {
         address proposer; // the member who submitted the proposal
-        address[] candidates; // list of candidates to include in a ballot
-        uint256[] totalVotes; // total votes each candidate received
-        uint256[] totalQuadraticVotes; // calculation of quadratic votes for each candidate
+        address applicant; // the applicant who wishes to become a member - this key will be used for withdrawals
         uint256 sharesRequested; // the # of shares the applicant is requesting
         uint256 startingPeriod; // the period in which voting can start for this proposal
         uint256 yesVotes; // the total number of YES votes for this proposal
         uint256 noVotes; // the total number of NO votes for this proposal
         bool processed; // true only if the proposal has been processed
-        bool didPass; // true only if the proposal has elected a candidate
-        address electedCandidate; // address of an electeed candidate
+        bool didPass; // true only if the proposal passed
         bool aborted; // true only if applicant calls "abort" fn before end of voting period
         uint256 tokenTribute; // amount of tokens offered as tribute
         string details; // proposal details - could be IPFS hash, plaintext, or JSON
         uint256 maxTotalSharesAtYesVote; // the maximum # of total shares encountered at a yes vote on this proposal
-        mapping (address => Ballot) votesByMember; // list of candidates and corresponding votes
+        mapping (address => Vote) votesByMember; // the votes on this proposal by each member
     }
 
     Proposal[] public proposalQueue;
 ```
-
-##### Ballot
-The `Ballot` struct stores all relevant data for each voter participating in a proposal, and is saved in the `votesByMember` mapping included on each proposal.
-
-```
-    struct Ballot {
-        uint256[] votes,
-        uint256[] quadraticVotes,
-        address[] candidate
-    }
-```
-
-The `votes` and `quadraticVotes` for each corresponding `candidate` share the same index for every `Ballot`. 
-
 
 ##### Members
 The `Member` struct stores all relevant data for each member, and is saved in the `members` mapping by the member's address.
@@ -233,7 +209,7 @@ The `Member` struct stores all relevant data for each member, and is saved in th
         address delegateKey; // the key responsible for submitting proposals and voting - defaults to member address unless updated
         uint256 shares; // the # of shares assigned to this member
         bool exists; // always true once a member has been created
-        uint256 highestIndexVote; // highest proposal index # on which the member voted YES
+        uint256 highestIndexYesVote; // highest proposal index # on which the member voted YES
     }
 
     mapping (address => Member) public members;
@@ -243,6 +219,16 @@ The `Member` struct stores all relevant data for each member, and is saved in th
 The `exists` field is set to `true` when a member is accepted and remains `true` even if a member redeems 100% of their shares. It is used to prevent overwriting existing members (who may have ragequit all their shares).
 
 For additional security, members can optionally change their `delegateKey` (used for submitting and voting on proposals) to a different address by calling `updateDelegateKey`. The `memberAddressByDelegateKey` stores the member's address by the `delegateKey` address.
+
+##### Votes
+The Vote enum reflects the possible values of a proposal vote by a member.
+```
+    enum Vote {
+        Null, // default value, counted as abstention
+        Yes,
+        No
+    }
+```
 
 ## Modifiers
 
@@ -275,7 +261,6 @@ Applied only to `submitProposal` and `submitVote`.
 3. Saves passed in values for global constants `periodDuration`, `votingPeriodLength`, `gracePeriodLength`, `abortWindow`, `proposalDeposit`, `dilutionBound`,  and `processingReward`.
 4. Saves the start time of Moloch `summoningTime = now`.
 5. Mints 1 share for the `summoner` and saves their membership.
-6. `_quadraticMode` determines whether the votes will be tallied using quadratic formula or traditional vote counting. 
 
 ```
     constructor(
@@ -287,8 +272,7 @@ Applied only to `submitProposal` and `submitVote`.
         uint256 _abortWindow,
         uint256 _proposalDeposit,
         uint256 _dilutionBound,
-        uint256 _processingReward,
-        uint256 _quadraticMode
+        uint256 _processingReward
     ) public {
         require(summoner != address(0), "Moloch::constructor - summoner cannot be 0");
         require(_approvedToken != address(0), "Moloch::constructor - _approvedToken cannot be 0");
@@ -297,7 +281,7 @@ Applied only to `submitProposal` and `submitVote`.
         require(_votingPeriodLength <= MAX_VOTING_PERIOD_LENGTH, "Moloch::constructor - _votingPeriodLength exceeds limit");
         require(_gracePeriodLength <= MAX_GRACE_PERIOD_LENGTH, "Moloch::constructor - _gracePeriodLength exceeds limit");
         require(_abortWindow > 0, "Moloch::constructor - _abortWindow cannot be 0");
-        require(_abortWindow <= _votingPeriodLength, "Moloch::constructor - _abortWindow must be smaller than or equal to _votingPeriodLength");
+        require(_abortWindow <= _votingPeriodLength, "Moloch::constructor - _abortWindow must be smaller than _votingPeriodLength");
         require(_dilutionBound > 0, "Moloch::constructor - _dilutionBound cannot be 0");
         require(_dilutionBound <= MAX_DILUTION_BOUND, "Moloch::constructor - _dilutionBound exceeds limit");
         require(_proposalDeposit >= _processingReward, "Moloch::constructor - _proposalDeposit cannot be smaller than _processingReward");
@@ -313,7 +297,6 @@ Applied only to `submitProposal` and `submitVote`.
         proposalDeposit = _proposalDeposit;
         dilutionBound = _dilutionBound;
         processingReward = _processingReward;
-        quadraticMode = _quadraticMode;
 
         summoningTime = now;
 
@@ -324,7 +307,6 @@ Applied only to `submitProposal` and `submitVote`.
         emit SummonComplete(summoner, 1);
     }
 
-
 ```
 
 ### submitProposal
@@ -332,11 +314,10 @@ At any time, members can submit new proposals using their `delegateKey`.
 1. Updates `totalSharesRequested` with the shares requested by the proposal.
 2. Transfers the proposal deposit and tribute ETH to the `Moloch.sol` contract to be held in escrow until the proposal vote is completed and processed.
 4. Calculates the proposal starting period, creates a new proposal, and pushes the proposal to the end of the `proposalQueue`.
-5. Proposals include an array with `candidates` and the elected one will get the corresponding shares. 
 
 ```
     function submitProposal(
-        address[] candidates,
+        address applicant,
         uint256 tokenTribute,
         uint256 sharesRequested,
         string memory details
@@ -344,10 +325,7 @@ At any time, members can submit new proposals using their `delegateKey`.
         public
         onlyDelegate
     {
-        require(candidates.length > 0, "QuadraticMoloch::submitProposal - at least 1 candidate is required.");
-        for (uint i=0; i < candidates.length; i++) {
-            require(candidates[i] != address(0), "Moloch::submitProposal - candidate cannot be 0");
-        }
+        require(applicant != address(0), "Moloch::submitProposal - applicant cannot be 0");
 
         // Make sure we won't run into overflows when doing calculations with shares.
         // Note that totalShares + totalSharesRequested + sharesRequested is an upper bound
@@ -361,10 +339,8 @@ At any time, members can submit new proposals using their `delegateKey`.
         // collect proposal deposit from proposer and store it in the Moloch until the proposal is processed
         require(approvedToken.transferFrom(msg.sender, address(this), proposalDeposit), "Moloch::submitProposal - proposal deposit token transfer failed");
 
-        // collect tribute from candidate list and store it in the Moloch until the proposal is processed
-        for (uint k=0; k < candidates.length; k++) {
-            require(approvedToken.transferFrom(candidates[k], address(this), tokenTribute), "Moloch::submitProposal - tribute token transfer failed");
-        }
+        // collect tribute from applicant and store it in the Moloch until the proposal is processed
+        require(approvedToken.transferFrom(applicant, address(this), tokenTribute), "Moloch::submitProposal - tribute token transfer failed");
 
         // compute startingPeriod for proposal
         uint256 startingPeriod = max(
@@ -375,11 +351,13 @@ At any time, members can submit new proposals using their `delegateKey`.
         // create proposal ...
         Proposal memory proposal = Proposal({
             proposer: memberAddress,
-            candidates: candidates,
+            applicant: applicant,
             sharesRequested: sharesRequested,
             startingPeriod: startingPeriod,
-            electedCandidate: address(0x0),
+            yesVotes: 0,
+            noVotes: 0,
             processed: false,
+            didPass: false,
             aborted: false,
             tokenTribute: tokenTribute,
             details: details,
@@ -390,7 +368,7 @@ At any time, members can submit new proposals using their `delegateKey`.
         proposalQueue.push(proposal);
 
         uint256 proposalIndex = proposalQueue.length.sub(1);
-        emit SubmitProposal(proposalIndex, msg.sender, memberAddress, candidates, tokenTribute, sharesRequested);
+        emit SubmitProposal(proposalIndex, msg.sender, memberAddress, applicant, tokenTribute, sharesRequested);
     }
 ```
 
@@ -401,69 +379,49 @@ Existing members can earn additional voting shares through new proposals if they
 ### submitVote
 While a proposal is in its voting period, members can submit their vote using their `delegateKey`.
 1. Saves the vote on the proposal by the member address.
-
+2. Based on their vote, adds the member's voting shares to the proposal `yesVotes` or `noVotes` tallies.
+4. If the member voted **Yes** and this is now the highest index proposal they voted **Yes** on, update their `highestIndexYesVote`.
+5. If the member voted **Yes** and this is now the most total shares that the Guild had during any **Yes** vote, update the proposal `maxTotalSharesAtYesVote`.
 
 ```
-    function submitVote(uint256 proposalIndex, address candidate, uint256 votes) public onlyDelegate {
+    function submitVote(uint256 proposalIndex, uint8 uintVote) public onlyDelegate {
         address memberAddress = memberAddressByDelegateKey[msg.sender];
         Member storage member = members[memberAddress];
 
         require(proposalIndex < proposalQueue.length, "Moloch::submitVote - proposal does not exist");
         Proposal storage proposal = proposalQueue[proposalIndex];
-        
-        require(votes > 0, "QuadraticMoloch::submitVote - at least one vote must be cast");
+
+        require(uintVote < 3, "Moloch::submitVote - uintVote must be less than 3");
+        Vote vote = Vote(uintVote);
+
         require(getCurrentPeriod() >= proposal.startingPeriod, "Moloch::submitVote - voting period has not started");
         require(!hasVotingPeriodExpired(proposal.startingPeriod), "Moloch::submitVote - proposal voting period has expired");
+        require(proposal.votesByMember[memberAddress] == Vote.Null, "Moloch::submitVote - member has already voted on this proposal");
+        require(vote == Vote.Yes || vote == Vote.No, "Moloch::submitVote - vote must be either Yes or No");
         require(!proposal.aborted, "Moloch::submitVote - proposal has been aborted");
 
         // store vote
-        Ballot memberBallot = proposal.votesByMember[memberAddress];
-
-        uint256 totalVotes = 0;
-        uint256 newVotes = 0;
-        bool update = false;
-        uint256 quadraticVotes = 0;
-        for (uint i = 0; i < memberBallot.candidate.length; i++) {
-            if (memberBallot.candidate[i] == candidate) {
-                update = true;
-                newVotes = memberBallot.votes[i].add(votes);
-                quadraticVotes = sqrt(newVotes);
-                memberBallot.votes[i] = newVotes;
-                memberBallot.quadraticVotes[i] = quadraticVotes;
-            }
-            totalVotes = totalVotes.add(memberBallot.votes[i]);
-        }
-        require(totalVotes <= member.shares, "QuadraticMoloch::submitVote - not enough shares to cast this quantity of votes");
-
-        if (!update) {
-            memberBallot.candidate.push(candidate);
-            memberBallot.votes.push(votes);
-            quadraticVotes = sqrt(votes);
-            memberBallot.quadraticVotes.push(quadraticVotes);
-            proposal.votesByMember[memberAddress] = memberBallot;
-        }
+        proposal.votesByMember[memberAddress] = vote;
 
         // count vote
-        update = false;
-        for (uint k = 0; k < proposal.candidates.length; k++) {
-            if (proposal.candidates[k] == candidate) {
-                proposal.totalVotes[k] = proposal.totalVotes[k].add(votes);
-                proposal.totalQuadraticVotes[k] = sqrt(proposal.totalVotes[k]);
-                update = true;
+        if (vote == Vote.Yes) {
+            proposal.yesVotes = proposal.yesVotes.add(member.shares);
+
+            // set highest index (latest) yes vote - must be processed for member to ragequit
+            if (proposalIndex > member.highestIndexYesVote) {
+                member.highestIndexYesVote = proposalIndex;
             }
-        }
-        if (!update) {
-            proposal.candidates.push(candidate);
-            proposal.totalVotes.push(votes);
-            proposal.totalQuadraticVotes.push(sqrt(votes));
+
+            // set maximum of total shares encountered at a yes vote - used to bound dilution for yes voters
+            if (totalShares > proposal.maxTotalSharesAtYesVote) {
+                proposal.maxTotalSharesAtYesVote = totalShares;
+            }
+
+        } else if (vote == Vote.No) {
+            proposal.noVotes = proposal.noVotes.add(member.shares);
         }
 
-        if (proposalIndex > member.highestIndexVote) {
-            member.highestIndexVote = proposalIndex;
-        }
-
-        emit SubmitVote(proposalIndex, msg.sender, memberAddress, candidate, votes, quadraticVotes);
-    }
+        emit SubmitVote(proposalIndex, msg.sender, memberAddress, uintVote);
 ```
 
 ### processProposal
@@ -473,13 +431,13 @@ After a proposal has completed its grace period, anyone can call `processProposa
 2. Update `totalSharesRequested` to deduct the proposal shares requested.
 3. Determine if the proposal passed or failed based on the votes and whether or not the dilution bound was exceeded.
 4. If the proposal passed (and was not aborted):
-    4.1. If the elected candidate is an existing member, add the requested shares to their existing shares.
-    4.2. If the elected candidate is a new member, save their data and set their default `delegateKey` to be the same as their member address.
+    4.1. If the applicant is an existing member, add the requested shares to their existing shares.
+    4.2. If the applicant is a new member, save their data and set their default `delegateKey` to be the same as their member address.
         4.2.1. For new members, if the member address is taken by an existing member's `delegateKey` forcibly reset that member's `delegateKey` to their member address.
     4.3. Update the `totalShares`.
     4.4. Transfer the tribute ETH being held in escrow to the `GuildBank.sol` contract.
 5. Otherwise (if the proposal failed or was aborted):
-   5.1. Return all the tribute being held in escrow to the elected candidate.
+   5.1. Return all the tribute being held in escrow to the applicant.
 6. Send the processing reward to the address that called this function.
 7. Send the proposal deposit (minus the processing reward) back to the proposer.
 
@@ -495,23 +453,7 @@ After a proposal has completed its grace period, anyone can call `processProposa
         proposal.processed = true;
         totalSharesRequested = totalSharesRequested.sub(proposal.sharesRequested);
 
-        // Get elected candidate
-        uint256 largest = 0;
-        uint elected = 0;
-        require(proposal.totalVotes.length > 0, "QuadraticMoloch::processProposal - this proposal has not received any votes.");
-        bool didPass = true;
-        for (uint i = 0; i < proposal.totalVotes.length; i++) {
-            if (quadraticMode) {
-                if (proposal.totalQuadraticVotes[i] > largest) {
-                    largest = proposal.totalQuadraticVotes[i];
-                    elected = i;
-                }
-            } else if (proposal.totalVotes[i] > largest) {
-                largest = proposal.totalVotes[i];
-                elected = i;
-            }
-        }
-        electedCandidate = proposal.candidates[i];
+        bool didPass = proposal.yesVotes > proposal.noVotes;
 
         // Make the proposal fail if the dilutionBound is exceeded
         if (totalShares.mul(dilutionBound) < proposal.maxTotalSharesAtYesVote) {
@@ -523,22 +465,22 @@ After a proposal has completed its grace period, anyone can call `processProposa
 
             proposal.didPass = true;
 
-            // if the elected candidate is already a member, add to their existing shares
-            if (members[electedCandidate].exists) {
-                members[electedCandidate].shares = members[electedCandidate].shares.add(proposal.sharesRequested);
+            // if the applicant is already a member, add to their existing shares
+            if (members[proposal.applicant].exists) {
+                members[proposal.applicant].shares = members[proposal.applicant].shares.add(proposal.sharesRequested);
 
             // the applicant is a new member, create a new record for them
             } else {
                 // if the applicant address is already taken by a member's delegateKey, reset it to their member address
-                if (members[memberAddressByDelegateKey[electedCandidate]].exists) {
-                    address memberToOverride = memberAddressByDelegateKey[electedCandidate];
+                if (members[memberAddressByDelegateKey[proposal.applicant]].exists) {
+                    address memberToOverride = memberAddressByDelegateKey[proposal.applicant];
                     memberAddressByDelegateKey[memberToOverride] = memberToOverride;
                     members[memberToOverride].delegateKey = memberToOverride;
                 }
 
-                // use elected candidate address as delegateKey by default
-                members[electedCandidate] = Member(electedCandidate, proposal.sharesRequested, true, 0);
-                memberAddressByDelegateKey[electedCandidate] = electedCandidate;
+                // use applicant address as delegateKey by default
+                members[proposal.applicant] = Member(proposal.applicant, proposal.sharesRequested, true, 0);
+                memberAddressByDelegateKey[proposal.applicant] = proposal.applicant;
             }
 
             // mint new shares
@@ -554,7 +496,7 @@ After a proposal has completed its grace period, anyone can call `processProposa
         } else {
             // return all tokens to the applicant
             require(
-                approvedToken.transfer(electedCandidate, proposal.tokenTribute),
+                approvedToken.transfer(proposal.applicant, proposal.tokenTribute),
                 "Moloch::processProposal - failing vote token transfer failed"
             );
         }
@@ -573,7 +515,7 @@ After a proposal has completed its grace period, anyone can call `processProposa
 
         emit ProcessProposal(
             proposalIndex,
-            electedCandidate,
+            proposal.applicant,
             proposal.proposer,
             proposal.tokenTribute,
             proposal.sharesRequested,
@@ -600,7 +542,7 @@ At any time, so long as a member has not voted YES on any proposal in the voting
 
         require(member.shares >= sharesToBurn, "Moloch::ragequit - insufficient shares");
 
-        require(canRagequit(member.highestIndexVote), "Moloch::ragequit - cant ragequit until highest index proposal member voted YES on is processed");
+        require(canRagequit(member.highestIndexYesVote), "Moloch::ragequit - cant ragequit until highest index proposal member voted YES on is processed");
 
         // burn shares
         member.shares = member.shares.sub(sharesToBurn);
@@ -718,11 +660,11 @@ Returns the length of the proposal queue.
 
 #### canRagequit
 
-Returns true if the `highestIndexVote` proposal has been processed.
+Returns true if the `highestIndexYesVote` proposal has been processed.
 ```
-    function canRagequit(uint256 highestIndexVote) public view returns (bool) {
-        require(highestIndexVote < proposalQueue.length, "Moloch::canRagequit - proposal does not exist");
-        return proposalQueue[highestIndexVote].processed;
+    function canRagequit(uint256 highestIndexYesVote) public view returns (bool) {
+        require(highestIndexYesVote < proposalQueue.length, "Moloch::canRagequit - proposal does not exist");
+        return proposalQueue[highestIndexYesVote].processed;
     }
 ```
 

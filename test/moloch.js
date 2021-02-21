@@ -106,15 +106,16 @@ contract('Moloch', ([creator, summoner, applicant1, applicant2, processor, deleg
 
     const proposalData = await moloch.proposalQueue.call(proposalIndex)
     assert.equal(proposalData.proposer, proposer)
-    //assert.equal(proposalData.applicant, proposal.applicant)  //Can't call array in a struct
+    assert.equal(proposalData.applicant, proposal.applicant)
     if (typeof proposal.sharesRequested === 'number') {
       assert.equal(proposalData.sharesRequested, proposal.sharesRequested)
     } else {
       // for testing overflow boundary with BNs
       assert(proposalData.sharesRequested.eq(proposal.sharesRequested))
     }
-    
     assert.equal(proposalData.startingPeriod, expectedStartingPeriod)
+    assert.equal(proposalData.yesVotes, 0)
+    assert.equal(proposalData.noVotes, 0)
     assert.equal(proposalData.processed, false)
     assert.equal(proposalData.didPass, false)
     assert.equal(proposalData.aborted, false)
@@ -170,12 +171,33 @@ contract('Moloch', ([creator, summoner, applicant1, applicant2, processor, deleg
     expectedVote,
     options
   ) => {
+    const initialYesVotes = options.initialYesVotes
+      ? options.initialYesVotes
+      : 0
+    const initialNoVotes = options.initialNoVotes ? options.initialNoVotes : 0
+    const expectedMaxSharesAtYesVote = options.expectedMaxSharesAtYesVote
+      ? options.expectedMaxSharesAtYesVote
+      : 0
 
-    const MemberVote = await moloch.getMemberProposalVote.call(summoner, proposalIndex)
-  
-    assert.equal(MemberVote[0], 1)    //Value of single vote
-    assert.equal(MemberVote[1], 1)    //Value of quadratic vote
-    assert.equal(MemberVote[2], proposal1.applicant)    //Address of voted candidate
+    const proposalData = await moloch.proposalQueue.call(proposalIndex)
+    assert.equal(
+      proposalData.yesVotes,
+      initialYesVotes + (expectedVote === 1 ? 1 : 0)
+    )
+    assert.equal(
+      proposalData.noVotes,
+      initialNoVotes + (expectedVote === 1 ? 0 : 1)
+    )
+    assert.equal(
+      proposalData.maxTotalSharesAtYesVote,
+      expectedMaxSharesAtYesVote
+    )
+
+    const memberVote = await moloch.getMemberProposalVote(
+      memberAddress,
+      proposalIndex
+    )
+    assert.equal(memberVote, expectedVote)
   }
 
   // VERIFY PROCESS PROPOSAL - note: doesnt check forced reset of delegate key
@@ -211,6 +233,15 @@ contract('Moloch', ([creator, summoner, applicant1, applicant2, processor, deleg
     const initialProcessorBalance = options.initialProcessorBalance
       ? options.initialProcessorBalance
       : 0
+    const expectedYesVotes = options.expectedYesVotes
+      ? options.expectedYesVotes
+      : 0
+    const expectedNoVotes = options.expectedNoVotes
+      ? options.expectedNoVotes
+      : 0
+    const expectedMaxSharesAtYesVote = options.expectedMaxSharesAtYesVote
+      ? options.expectedMaxSharesAtYesVote
+      : 0
     const expectedFinalTotalSharesRequested = options.expectedFinalTotalSharesRequested
       ? options.expectedFinalTotalSharesRequested
       : 0
@@ -219,16 +250,20 @@ contract('Moloch', ([creator, summoner, applicant1, applicant2, processor, deleg
     const aborted =
       typeof options.aborted === 'boolean' ? options.aborted : false
 
-    
     const proposalData = await moloch.proposalQueue.call(proposalIndex)
-    
+    assert.equal(proposalData.yesVotes, expectedYesVotes)
+    assert.equal(proposalData.noVotes, expectedNoVotes)
+    assert.equal(
+      proposalData.maxTotalSharesAtYesVote,
+      expectedMaxSharesAtYesVote
+    )
     assert.equal(proposalData.processed, true)
     assert.equal(proposalData.didPass, didPass)
     assert.equal(proposalData.aborted, aborted)
-   
+
     const totalSharesRequested = await moloch.totalSharesRequested()
     assert.equal(totalSharesRequested, expectedFinalTotalSharesRequested)
- 
+
     const totalShares = await moloch.totalShares()
     assert.equal(
       totalShares,
@@ -305,6 +340,7 @@ contract('Moloch', ([creator, summoner, applicant1, applicant2, processor, deleg
         assert.equal(newMemberData.delegateKey, proposal.applicant)
         assert.equal(newMemberData.shares, proposal.sharesRequested)
         assert.equal(newMemberData.exists, true)
+        assert.equal(newMemberData.highestIndexYesVote, 0)
 
         const newMemberAddressByDelegateKey = await moloch.memberAddressByDelegateKey(
           proposal.applicant
@@ -335,7 +371,7 @@ contract('Moloch', ([creator, summoner, applicant1, applicant2, processor, deleg
   before('deploy contracts', async () => {
     token = await Token.new(deploymentConfig.TOKEN_SUPPLY)
     moloch = await Moloch.new(
-      summoner,
+      deploymentConfig.SUMMONER,
       token.address,
       deploymentConfig.PERIOD_DURATION_IN_SECONDS,
       deploymentConfig.VOTING_DURATON_IN_PERIODS,
@@ -343,8 +379,7 @@ contract('Moloch', ([creator, summoner, applicant1, applicant2, processor, deleg
       deploymentConfig.ABORT_WINDOW_IN_PERIODS,
       deploymentConfig.PROPOSAL_DEPOSIT,
       deploymentConfig.DILUTION_BOUND,
-      deploymentConfig.PROCESSING_REWARD,
-      true,
+      deploymentConfig.PROCESSING_REWARD
     )
 
     const guildBankAddress = await moloch.guildBank()
@@ -363,7 +398,7 @@ contract('Moloch', ([creator, summoner, applicant1, applicant2, processor, deleg
       applicant: applicant1,
       tokenTribute: 100,
       sharesRequested: 1,
-      details: 'all hail quadratic moloch'
+      details: 'all hail moloch'
     }
 
     token.transfer(summoner, initSummonerBalance, { from: creator })
@@ -413,17 +448,16 @@ contract('Moloch', ([creator, summoner, applicant1, applicant2, processor, deleg
     const currentPeriod = await moloch.getCurrentPeriod()
     assert.equal(+currentPeriod, 0)
 
-     
-    const summonerData = await moloch.members(summoner)
-    assert.equal(summonerData.delegateKey.toLowerCase(), summoner.toLowerCase()) // delegateKey matches
+    const summonerData = await moloch.members(deploymentConfig.SUMMONER)
+    assert.equal(summonerData.delegateKey.toLowerCase(), deploymentConfig.SUMMONER) // delegateKey matches
     assert.equal(summonerData.shares, 1)
     assert.equal(summonerData.exists, true)
-    assert.equal(summonerData.highestIndexVote, 0)
-    
+    assert.equal(summonerData.highestIndexYesVote, 0)
+
     const summonerAddressByDelegateKey = await moloch.memberAddressByDelegateKey(
-      summoner
+      deploymentConfig.SUMMONER
     )
-    assert.equal(summonerAddressByDelegateKey.toLowerCase(), summoner.toLowerCase())
+    assert.equal(summonerAddressByDelegateKey.toLowerCase(), deploymentConfig.SUMMONER)
 
     const totalShares = await moloch.totalShares()
     assert.equal(+totalShares, 1)
@@ -435,8 +469,8 @@ contract('Moloch', ([creator, summoner, applicant1, applicant2, processor, deleg
     assert.equal(+summonerBalance.toString(), initSummonerBalance)
     const creatorBalance = await token.balanceOf(creator)
     assert.equal(creatorBalance, deploymentConfig.TOKEN_SUPPLY - initSummonerBalance)
-    
   })
+
   describe('submitProposal', () => {
     beforeEach(async () => {
       await token.transfer(proposal1.applicant, proposal1.tokenTribute, {
@@ -447,13 +481,10 @@ contract('Moloch', ([creator, summoner, applicant1, applicant2, processor, deleg
         from: proposal1.applicant
       })
     })
-    it('happy case - submit quadratic proposal', async () => {
-      //Test if quadratic is active
-      let quadratic = await moloch.quadraticMode()
-      assert.equal(quadratic, true)
-      //Test submit quadratic proposal
+
+    it('happy case', async () => {
       await moloch.submitProposal(
-        [proposal1.applicant],
+        proposal1.applicant,
         proposal1.tokenTribute,
         proposal1.sharesRequested,
         proposal1.details,
@@ -465,7 +496,7 @@ contract('Moloch', ([creator, summoner, applicant1, applicant2, processor, deleg
         initialProposerBalance: initSummonerBalance
       })
     })
-    /*
+
     describe('uint overflow boundary', () => {
       it('require fail - uint overflow', async () => {
         proposal1.sharesRequested = _1e18
@@ -571,7 +602,6 @@ contract('Moloch', ([creator, summoner, applicant1, applicant2, processor, deleg
         initialProposerBalance: initSummonerBalance
       })
     })
-    */
   })
 
   describe('submitVote', () => {
@@ -585,31 +615,22 @@ contract('Moloch', ([creator, summoner, applicant1, applicant2, processor, deleg
       })
 
       await moloch.submitProposal(
-        [proposal1.applicant],
+        proposal1.applicant,
         proposal1.tokenTribute,
         proposal1.sharesRequested,
         proposal1.details,
         { from: summoner }
       )
     })
-    it('happy case - submit quadratic vote', async () => {
+
+    it('happy case - yes vote', async () => {
       await moveForwardPeriods(1)
-      
-      await moloch.submitVote(0, proposal1.applicant, 1, { from: summoner })
-
+      await moloch.submitVote(0, 1, { from: summoner })
       await verifySubmitVote(proposal1, 0, summoner, 1, {
-        expectedMaxSharesAtYesVote: 0
+        expectedMaxSharesAtYesVote: 1
       })
-
-
-      //TEST QUADRATIC VOTE INPUT
-      
-
-
-
-      
     })
-    /*
+
     it('happy case - no vote', async () => {
       await moveForwardPeriods(1)
       await moloch.submitVote(0, 2, { from: summoner })
@@ -681,7 +702,6 @@ contract('Moloch', ([creator, summoner, applicant1, applicant2, processor, deleg
         .submitVote(0, 1, { from: creator })
         .should.be.rejectedWith('not a delegate')
     })
-    */
   })
 
   describe('processProposal', () => {
@@ -695,7 +715,7 @@ contract('Moloch', ([creator, summoner, applicant1, applicant2, processor, deleg
       })
 
       await moloch.submitProposal(
-        [proposal1.applicant],
+        proposal1.applicant,
         proposal1.tokenTribute,
         proposal1.sharesRequested,
         proposal1.details,
@@ -703,27 +723,24 @@ contract('Moloch', ([creator, summoner, applicant1, applicant2, processor, deleg
       )
 
       await moveForwardPeriods(1)
-      await moloch.submitVote(0, proposal1.applicant, 1, { from: summoner })
+      await moloch.submitVote(0, 1, { from: summoner })
 
       await moveForwardPeriods(deploymentConfig.VOTING_DURATON_IN_PERIODS)
     })
 
-    it('happy case - process quadratic proposal', async () => {
+    it('happy case', async () => {
       await moveForwardPeriods(deploymentConfig.GRACE_DURATON_IN_PERIODS)
       await moloch.processProposal(0, { from: processor })
-      
       await verifyProcessProposal(proposal1, 0, summoner, processor, {
         initialTotalSharesRequested: 1,
         initialTotalShares: 1,
         initialMolochBalance: 110,
         initialProposerBalance: initSummonerBalance - deploymentConfig.PROPOSAL_DEPOSIT,
+        expectedYesVotes: 1,
+        expectedMaxSharesAtYesVote: 1
       })
-      
-     
-      
     })
-   
-    /*
+
     it('require fail - proposal does not exist', async () => {
       await moveForwardPeriods(deploymentConfig.GRACE_DURATON_IN_PERIODS)
       await moloch
@@ -744,11 +761,9 @@ contract('Moloch', ([creator, summoner, applicant1, applicant2, processor, deleg
       await moloch
         .processProposal(0)
         .should.be.rejectedWith('proposal has already been processed')
-    })  
+    })
   })
-  */
 
-  /*
   describe('processProposal - edge cases', () => {
     beforeEach(async () => {
       await token.transfer(proposal1.applicant, proposal1.tokenTribute, {
@@ -902,7 +917,6 @@ contract('Moloch', ([creator, summoner, applicant1, applicant2, processor, deleg
       })
     })
   })
-  */
 
   describe('ragequit', () => {
     beforeEach(async () => {
@@ -915,7 +929,7 @@ contract('Moloch', ([creator, summoner, applicant1, applicant2, processor, deleg
       })
 
       await moloch.submitProposal(
-        [proposal1.applicant],
+        proposal1.applicant,
         proposal1.tokenTribute,
         proposal1.sharesRequested,
         proposal1.details,
@@ -923,28 +937,40 @@ contract('Moloch', ([creator, summoner, applicant1, applicant2, processor, deleg
       )
 
       await moveForwardPeriods(1)
-      await moloch.submitVote(1, proposal1.applicant, 1, { from: summoner })
+      await moloch.submitVote(0, 1, { from: summoner })
+
       await moveForwardPeriods(deploymentConfig.VOTING_DURATON_IN_PERIODS)
       await moveForwardPeriods(deploymentConfig.GRACE_DURATON_IN_PERIODS)
-      await moloch.processProposal(0, { from: processor })
-      
     })
 
-    it('happy case - ragequit quadratic proposal', async () => {
-      await moloch.processProposal(1)
+    it('happy case', async () => {
+      await moloch.processProposal(0)
       await moloch.ragequit(1, { from: summoner })
 
       const totalShares = await moloch.totalShares()
-      assert.equal(totalShares - 1, proposal1.sharesRequested)
+      assert.equal(totalShares, proposal1.sharesRequested)
 
       const summonerData = await moloch.members(summoner)
       assert.equal(summonerData.shares, 0)
       assert.equal(summonerData.exists, true)
-      
+      assert.equal(summonerData.highestIndexYesVote, 0)
+
+      // can divide tokenTribute by 2 because 2 shares
+      const summonerBalance = await token.balanceOf(summoner)
+      const expectedBalance =
+        initSummonerBalance -
+        deploymentConfig.PROCESSING_REWARD +
+        proposal1.tokenTribute / 2
+      assert.equal(+summonerBalance.toString(), expectedBalance)
+
       const molochBalance = await token.balanceOf(moloch.address)
-      assert.equal(molochBalance, 0) 
+      assert.equal(molochBalance, 0)
+
+      // guild bank has the other half of the funds
+      const guildBankBalance = await token.balanceOf(guildBank.address)
+      assert.equal(guildBankBalance, proposal1.tokenTribute / 2)
     })
-    /*
+
     it('require fail - insufficient shares', async () => {
       await moloch.processProposal(0)
       await moloch
@@ -993,14 +1019,10 @@ contract('Moloch', ([creator, summoner, applicant1, applicant2, processor, deleg
       const guildBankBalance2 = await token.balanceOf(guildBank.address)
       assert.equal(guildBankBalance2, guildBankBalance1 / 2)
     })
-    */  
+
     // TODO how might guildbank withdrawal fail?
-    // - it could uint256 overflow 
+    // - it could uint256 overflow
   })
-
-
-
-
 
   describe('abort', () => {
     beforeEach(async () => {
@@ -1013,34 +1035,46 @@ contract('Moloch', ([creator, summoner, applicant1, applicant2, processor, deleg
       })
 
       await moloch.submitProposal(
-        [proposal1.applicant],
+        proposal1.applicant,
         proposal1.tokenTribute,
         proposal1.sharesRequested,
         proposal1.details,
         { from: summoner }
       )
     })
-    
-    it('happy case - abort quadratic proposal', async () => {
-      
-      await moloch.abort(1, { from: proposal1.applicant })
-      
-      const proposal = await moloch.proposalQueue.call(1)
+
+    it('happy case', async () => {
+      await moloch.abort(0, { from: proposal1.applicant })
+
+      const proposal = await moloch.proposalQueue.call(0)
+      assert.equal(proposal.tokenTribute, 0)
       assert.equal(proposal.sharesRequested, 1)
+      assert.equal(proposal.yesVotes, 0)
+      assert.equal(proposal.noVotes, 0)
+      assert.equal(proposal.maxTotalSharesAtYesVote, 0)
       assert.equal(proposal.processed, false)
       assert.equal(proposal.didPass, false)
       assert.equal(proposal.aborted, true)
-      
+
       const totalSharesRequested = await moloch.totalSharesRequested()
-      assert.equal(totalSharesRequested, 2)
+      assert.equal(totalSharesRequested, 1)
 
       const totalShares = await moloch.totalShares()
       assert.equal(totalShares, 1)
-      
+
+      const molochBalance = await token.balanceOf(moloch.address)
+      assert.equal(molochBalance, deploymentConfig.PROPOSAL_DEPOSIT)
+
+      const summonerBalance = await token.balanceOf(summoner)
+      assert.equal(
+        summonerBalance,
+        initSummonerBalance - deploymentConfig.PROPOSAL_DEPOSIT
+      )
+
       const applicantBalance = await token.balanceOf(proposal1.applicant)
       assert.equal(applicantBalance, proposal1.tokenTribute)
     })
-    /*
+
     it('require fail - proposal does not exist', async () => {
       await moloch
         .abort(1, { from: proposal1.applicant })
@@ -1080,10 +1114,8 @@ contract('Moloch', ([creator, summoner, applicant1, applicant2, processor, deleg
         assert.equal(applicantBalance, proposal1.tokenTribute)
       })
     })
-    */
   })
 
-  /*
   describe('updateDelegateKey', () => {
     beforeEach(async () => {
       // vote in a new member to test failing requires
@@ -1094,6 +1126,7 @@ contract('Moloch', ([creator, summoner, applicant1, applicant2, processor, deleg
       await token.approve(moloch.address, proposal1.tokenTribute, {
         from: proposal1.applicant
       })
+
       await moloch.submitProposal(
         proposal1.applicant,
         proposal1.tokenTribute,
@@ -1110,12 +1143,11 @@ contract('Moloch', ([creator, summoner, applicant1, applicant2, processor, deleg
       await moloch.processProposal(0, { from: processor })
     })
 
-    it('happy case - update delegatekey', async () => {
+    it('happy case', async () => {
       await moloch.updateDelegateKey(creator, { from: summoner })
       await verifyUpdateDelegateKey(summoner, summoner, creator)
     })
 
-    /*
     it('require fail - newDelegateKey cannot be 0', async () => {
       await moloch
         .updateDelegateKey(zeroAddress, { from: summoner })
@@ -1152,10 +1184,7 @@ contract('Moloch', ([creator, summoner, applicant1, applicant2, processor, deleg
       await verifyUpdateDelegateKey(summoner, creator, summoner)
     })
   })
-  */
 
-
-  /*
   describe('guildbank.withdraw', () => {
     it('modifier - owner', async () => {
       await guildBank
@@ -1163,9 +1192,7 @@ contract('Moloch', ([creator, summoner, applicant1, applicant2, processor, deleg
         .should.be.rejectedWith(SolRevert)
     })
   })
-  */
 
-  /*
   describe('two proposals', () => {
     beforeEach(async () => {
       proposal2 = {
@@ -1537,6 +1564,4 @@ contract('Moloch', ([creator, summoner, applicant1, applicant2, processor, deleg
       })
     })
   })
-  */
-
-})})
+})

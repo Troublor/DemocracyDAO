@@ -79,8 +79,7 @@ contract('Pool', ([deployer, summoner, firstPoolMember, depositor, firstMemberKe
       ABORT_WINDOW_IN_PERIODS,
       PROPOSAL_DEPOSIT,
       DILUTION_BOUND,
-      PROCESSING_REWARD,
-      false,
+      PROCESSING_REWARD
     )
 
     // We set the gas manually here because of
@@ -156,7 +155,6 @@ contract('Pool', ([deployer, summoner, firstPoolMember, depositor, firstMemberKe
     await assertBNEquals(pool.currentProposalIndex(), index)
   }
 
-  /*
   describe('constructor', () => {
     it('should be initialized with the right values', async () => {
       await assertTotalShares(0)
@@ -1108,5 +1106,4 @@ contract('Pool', ([deployer, summoner, firstPoolMember, depositor, firstMemberKe
       assert.isBelow(syncResult.receipt.gasUsed, Math.floor(block.gasLimit / 4))
     })
   })
-  */
 })
